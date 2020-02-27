@@ -1,81 +1,26 @@
 import torch
-import pdb
 
-def sinkhorn_stabilized(a, b, M, reg, numItermax=100, tau=1e3, stopThr=1e-3, print_period=20):
 
-    n_hists = 0
+def sinkhorn_pytorch(a, b, M, reg, stopThr=1e-3, numItermax=100):
 
     # init data
-    dim_a = len(a)
-    dim_b = len(b)
+    dim_a = a.shape[1]
+    dim_b = b.shape[1]
 
-    # we assume that no distances are null except those of the diagonal of
-    # distances
-    alpha, beta = torch.zeros(dim_a), torch.zeros(dim_b)
+    batch_size = b.shape[0]
 
-    u, v = torch.ones(dim_a) / dim_a, torch.ones(dim_b) / dim_b
+    u = torch.ones((batch_size, dim_a), requires_grad=False).cuda() / dim_a
+    v = torch.ones((batch_size, dim_b), requires_grad=False).cuda() / dim_b
+    K = torch.exp(-M / reg)
 
-    def get_K(alpha, beta):
-        """log space computation"""
-        return torch.exp(-(M - alpha.reshape((dim_a, 1)) - beta.reshape((1, dim_b))) / reg)
-
-    def get_Gamma(alpha, beta, u, v):
-        """log space gamma computation"""
-        return torch.exp(-(M - alpha.reshape((dim_a, 1)) - beta.reshape((1, dim_b))) / reg + torch.log(1e-6 +
-            u.reshape((dim_a, 1))) + torch.log(1e-6 + v.reshape((1, dim_b))))
-
-    # print(torch.min(K))
-
-    K = get_K(alpha, beta)
-    transp = K
-    loop = 1
+    Kp = (1 / a).unsqueeze(2) * K
     cpt = 0
     err = 1
 
-    while loop:
-
-        uprev = u
-        vprev = v
-
-        # sinkhorn update
-
-        v = b / (torch.tensordot(K.T, u, dims=([0], [0])) + 1e-6)
-        u = a / (torch.tensordot(K, v, dims=([1], [0])) + 1e-6)
-        # remove numerical problems and store them in K
-        if torch.abs(u).max() > tau or torch.abs(v).max() > tau:
-            if n_hists:
-                alpha, beta = alpha + reg * \
-                    torch.max(torch.log(u), 1), beta + reg * torch.max(torch.log(1e-6 + v))
-            else:
-                alpha, beta = alpha + reg * torch.log(u), beta + reg * torch.log(1e-6 + v)
-                if n_hists:
-                    u, v = torch.ones((dim_a, n_hists)) / dim_a, torch.ones((dim_b, n_hists)) / dim_b
-                else:
-                    u, v = torch.ones(dim_a) / dim_a, torch.ones(dim_b) / dim_b
-            K = get_K(alpha, beta)
-
-        if cpt % print_period == 0:
-            # we can speed up the process by checking for the error only all
-            # the 10th iterations
-            transp = get_Gamma(alpha, beta, u, v)
-            err = torch.norm((torch.sum(transp, dim=0) - b))
-
-
-        if err <= stopThr:
-            loop = False
-
-        if cpt >= numItermax:
-            loop = False
-
-        if torch.any(torch.isnan(u)) or torch.any(torch.isnan(v)):
-            # we have reached the machine precision
-            # come back to previous solution and quit loop
-            print('Warning: numerical errors at iteration', cpt)
-            u = uprev
-            v = vprev
-            break
-
+    while err > stopThr and cpt < numItermax:
+        KtransposeU = (K * u.unsqueeze(2)).sum(dim=1) # has shape K.shape[1]
+        v = b / KtransposeU
+        u = 1. / (Kp*v.unsqueeze(1)).sum(dim=2)
         cpt = cpt + 1
-
-    return get_Gamma(alpha, beta, u, v)
+    return u.unsqueeze(2) * K * v.unsqueeze(1)
 

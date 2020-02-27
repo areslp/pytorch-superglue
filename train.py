@@ -4,9 +4,12 @@ import pdb
 
 import torch.nn.modules
 from superglue.model import superglue
+from superglue.dataloader import HomographyDataLoader, collater
 from torch.autograd import Variable
 from torch import optim
 torch.autograd.set_detect_anomaly(True)
+from torch.utils.data import DataLoader
+
 
 def generate_keypoints():
     batch_size = 1
@@ -72,10 +75,13 @@ p2 = torch.from_numpy(p2).float()
 d2 = torch.from_numpy(d2).float()
 
 model = superglue()
+#model.load_state_dict(torch.load('model_200.pt'))
+if torch.cuda.is_available():
+    model.cuda()
 matches = []
 
-for i in range(p1.shape[1]):
-    matches.append((i, i))
+#for i in range(p1.shape[1]):
+#    matches.append((i, i))
 
 #for i in range(p1.shape[1], p2.shape[1]):
 #    matches.append((-1, i))
@@ -84,24 +90,46 @@ for i in range(p1.shape[1]):
 
 optimizer = optim.Adam(model.parameters(), lr=1e-4)
 
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
+#scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=3, verbose=True)
 
+def worker_init_fn(worker_id):
+    np.random.seed(np.random.get_state()[1][0] + worker_id)
 
-for epoch_num in range(100):
+homography_dataset = HomographyDataLoader()
+dataloader_train = DataLoader(homography_dataset, num_workers=0, batch_size=8, collate_fn=collater, worker_init_fn=worker_init_fn)
+import time
+st = time.time()
+for epoch_num in range(1000):
 
     epoch_loss = []
+    epoch_acc = []
 
-    for idx in range(100):
-            optimizer.zero_grad()
+    np.random.seed()
 
-            loss = model.forward(p1, d1, p2, d2, matches)
+    for inter_num, data in enumerate(dataloader_train):
 
-            if bool(loss == 0):
-                continue
+        kp1_np, kp2_np, descs1, descs2, all_matches = data
 
-            loss.backward()
+        if torch.cuda.is_available():
+            kp1_np = kp1_np.cuda()
+            kp2_np = kp2_np.cuda()
+            descs1 = descs1.cuda()
+            descs2 = descs2.cuda()
 
-            #torch.nn.utils.clip_grad_norm_(retinanet.parameters(), 0.1)
-            #print(loss)
+        optimizer.zero_grad()
 
-            optimizer.step()
+        loss, acc = model.forward(kp1_np, descs1, kp2_np, descs2, all_matches)
+
+        if bool(loss == 0):
+            continue
+
+        loss.backward()
+
+        epoch_acc.append(acc.item())
+        epoch_loss.append(loss.item())
+        print(f"Loss: {loss.item()} | Acc: {acc.item()}")
+
+        optimizer.step()
+    print(f"Epoch  {epoch_num} | Loss: {np.mean(epoch_loss):0.2f} | Acc: {100*np.mean(epoch_acc):0.2f}")
+    if epoch_num % 100 == 0:
+        torch.save(model.state_dict(), f'model_{epoch_num}.pt')
